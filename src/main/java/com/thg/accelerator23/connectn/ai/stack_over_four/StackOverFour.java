@@ -6,328 +6,262 @@ import com.thehutgroup.accelerator.connectn.player.Player;
 import com.thehutgroup.accelerator.connectn.player.Position;
 
 public class StackOverFour extends Player {
-  // Scoring constants for position evaluation
-  private static final int INFINITY = Integer.MAX_VALUE;
-  private static final int WIN_SCORE = 1000000;
-  private static final int CENTER_WEIGHT = 3;
-  private static final int HEIGHT_WEIGHT = 1;
+    // Core time constants (in milliseconds)
+    private static final long ABSOLUTE_LIMIT_MS = 7800;     // Never exceed this
+    private static final long CALIBRATION_LIMIT_MS = 1000;  // Max time for calibration
+    private static final long QUICK_MOVE_MS = 500;          // Time for simple positions
 
-  // Time management constants - carefully chosen to maximize performance
-  private static final long TARGET_TIME_MS = 7800;  // 7.8 seconds leaves safety margin
-  private static final long MINIMUM_MOVE_TIME_MS = 100;  // Never use less than 100ms
+    // Search parameters
+    private static final int MAX_DEPTH = 12;
+    private static final int MIN_DEPTH = 4;
+    private static final int INFINITY = Integer.MAX_VALUE;
+    private static final int CENTER_WEIGHT = 3;
+    private static final int[][] DIRECTIONS = {{1,0}, {0,1}, {1,1}, {1,-1}};
 
-  // Search depth parameters to balance analysis depth with time constraints
-  private static final int INITIAL_MAX_DEPTH = 6;
-  private static final int MIN_DEPTH = 4;
-  private static final int MAX_DEPTH = 12;
+    // Instance variables for performance tracking
+    private long startTime;
+    private int currentDepth;
+    private Runtime runtime;
 
-  // Direction vectors for checking connected pieces
-  private static final int[][] DIRECTIONS = {
-          {1, 0},   // Horizontal
-          {0, 1},   // Vertical
-          {1, 1},   // Diagonal down-right
-          {1, -1}   // Diagonal up-right
-  };
-
-  // Instance variables for performance tracking and optimization
-  private long startTime;                    // Start time of current move
-  private int currentMaxDepth;               // Current maximum search depth
-  private boolean isCalibrated;              // Whether initial calibration is complete
-  private int[] depthTimings;               // Historical timing data for each depth
-  private long lastMoveTime;                 // Duration of the previous move
-  private Runtime runtime;                   // Reference to runtime for memory monitoring
-
-  public StackOverFour(Counter counter) {
-    super(counter, "StackOverFour");
-    this.currentMaxDepth = INITIAL_MAX_DEPTH;
-    this.depthTimings = new int[MAX_DEPTH + 1];
-    this.isCalibrated = false;
-    this.lastMoveTime = 0;
-    this.runtime = Runtime.getRuntime();
-  }
-
-  @Override
-  public int makeMove(Board board) {
-    startTime = System.currentTimeMillis();
-
-    // Quick check for immediate wins or blocks
-    int tacticalMove = findTacticalMove(board);
-    if (tacticalMove != -1) {
-      return tacticalMove;
+    public StackOverFour(Counter counter) {
+        super(counter, "StackOverFour");
+        this.currentDepth = MIN_DEPTH;
+        this.runtime = Runtime.getRuntime();
     }
 
-    // Set initial search depth based on resources
-    currentMaxDepth = getOptimalSearchDepth();
+    @Override
+    public int makeMove(Board board) {
+        startTime = System.currentTimeMillis();
 
-    // Use iterative deepening to maximize our time usage
-    int bestMove = board.getConfig().getWidth() / 2;  // Default to center
-    int bestValue = -INFINITY;
-    int actualDepth = MIN_DEPTH;
-
-    // Iteratively deepen search until we run out of time
-    for (int depth = MIN_DEPTH; depth <= currentMaxDepth; depth++) {
-      long depthStartTime = System.currentTimeMillis();
-      int[] columns = getCenterBasedMoveOrder(board.getConfig().getWidth());
-
-      int tempBestMove = bestMove;
-      int tempBestValue = -INFINITY;
-
-      // Evaluate all possible moves at this depth
-      for (int column : columns) {
-        try {
-          Board nextPosition = new Board(board, column, getCounter());
-          int moveValue = minimax(nextPosition, depth, -INFINITY, INFINITY, false);
-
-          if (moveValue > tempBestValue) {
-            tempBestValue = moveValue;
-            tempBestMove = column;
-          }
-
-          if (isTimeUp()) {
-            break;
-          }
-        } catch (Exception e) {
-          continue;
+        // Handle simple positions quickly
+        if (isSimplePosition(board)) {
+            return handleSimplePosition(board);
         }
-      }
 
-      // Only update best move if we completed this depth
-      if (!isTimeUp()) {
-        bestMove = tempBestMove;
-        bestValue = tempBestValue;
-        actualDepth = depth;
-      } else {
-        break;
-      }
+        // Progressive deepening with strict time management
+        return performTimedSearch(board);
     }
 
-    // Update performance profile with timing data
-    lastMoveTime = System.currentTimeMillis() - startTime;
-    updateResourceProfile(lastMoveTime, actualDepth);
+    private boolean isSimplePosition(Board board) {
+        // Empty or near-empty board, or tactical position
+        return isEmptyBoard(board) || hasImmediateTacticalMove(board);
+    }
 
-    return bestMove;
-  }
-
-  private int findTacticalMove(Board board) {
-    // Check for winning moves first
-    for (int col = 0; col < board.getConfig().getWidth(); col++) {
-      try {
-        Board testBoard = new Board(board, col, getCounter());
-        if (isWinningMove(testBoard, col, board.getConfig().getnInARowForWin())) {
-          return col;
+    private int handleSimplePosition(Board board) {
+        // Check for immediate wins or blocks
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            try {
+                // Check for win
+                Board testBoard = new Board(board, col, getCounter());
+                if (isWinningMove(testBoard, col)) {
+                    return col;
+                }
+                // Check for block
+                testBoard = new Board(board, col, getCounter().getOther());
+                if (isWinningMove(testBoard, col)) {
+                    return col;
+                }
+            } catch (Exception e) {
+                continue;
+            }
         }
-      } catch (Exception e) {
-        continue;
-      }
+
+        // For empty board, return center column
+        return board.getConfig().getWidth() / 2;
     }
 
-    // Then check for blocking opponent's wins
-    for (int col = 0; col < board.getConfig().getWidth(); col++) {
-      try {
-        Board testBoard = new Board(board, col, getCounter().getOther());
-        if (isWinningMove(testBoard, col, board.getConfig().getnInARowForWin())) {
-          return col;
+    private int performTimedSearch(Board board) {
+        int bestMove = board.getConfig().getWidth() / 2;
+        currentDepth = MIN_DEPTH;
+
+        while (currentDepth <= MAX_DEPTH) {
+            if (isTimeExceeded(QUICK_MOVE_MS)) break;
+
+            int[] moves = getOrderedMoves(board);
+            int tempBestMove = evaluateMovesAtDepth(board, moves);
+
+            if (!isTimeExceeded(ABSOLUTE_LIMIT_MS)) {
+                bestMove = tempBestMove;
+                currentDepth++;
+            } else {
+                break;
+            }
         }
-      } catch (Exception e) {
-        continue;
-      }
+
+        return bestMove;
     }
 
-    return -1;  // No immediate tactical moves found
-  }
+    private int[] getOrderedMoves(Board board) {
+        int width = board.getConfig().getWidth();
+        int[] moves = new int[width];
+        int center = width / 2;
+        int index = 0;
 
-  private int minimax(Board board, int depth, int alpha, int beta, boolean isMaximizing) {
-    if (isTimeUp() || depth == 0) {
-      return evaluatePosition(board);
-    }
-
-    if (isMaximizing) {
-      int maxEval = -INFINITY;
-      for (int col = 0; col < board.getConfig().getWidth(); col++) {
-        try {
-          Board newBoard = new Board(board, col, getCounter());
-          int eval = minimax(newBoard, depth - 1, alpha, beta, false);
-          maxEval = Math.max(maxEval, eval);
-          alpha = Math.max(alpha, eval);
-          if (beta <= alpha) break;  // Alpha-beta pruning
-        } catch (Exception e) {
-          continue;
+        moves[index++] = center;
+        for (int offset = 1; offset <= center; offset++) {
+            if (center - offset >= 0) moves[index++] = center - offset;
+            if (center + offset < width) moves[index++] = center + offset;
         }
-      }
-      return maxEval;
-    } else {
-      int minEval = INFINITY;
-      for (int col = 0; col < board.getConfig().getWidth(); col++) {
-        try {
-          Board newBoard = new Board(board, col, getCounter().getOther());
-          int eval = minimax(newBoard, depth - 1, alpha, beta, true);
-          minEval = Math.min(minEval, eval);
-          beta = Math.min(beta, eval);
-          if (beta <= alpha) break;  // Alpha-beta pruning
-        } catch (Exception e) {
-          continue;
+
+        return moves;
+    }
+
+    private int evaluateMovesAtDepth(Board board, int[] moves) {
+        int bestMove = moves[0];
+        int bestValue = -INFINITY;
+
+        for (int move : moves) {
+            try {
+                Board nextBoard = new Board(board, move, getCounter());
+                int value = minimax(nextBoard, currentDepth, -INFINITY, INFINITY, false);
+
+                if (value > bestValue) {
+                    bestValue = value;
+                    bestMove = move;
+                }
+
+                if (isTimeExceeded(ABSOLUTE_LIMIT_MS)) break;
+            } catch (Exception e) {
+                continue;
+            }
         }
-      }
-      return minEval;
-    }
-  }
 
-  private boolean isEmptyBoard(Board board) {
-    for (int x = 0; x < board.getConfig().getWidth(); x++) {
-      for (int y = 0; y < board.getConfig().getHeight(); y++) {
-        if (board.getCounterAtPosition(new Position(x, y)) != null) {
-          return false;
+        return bestMove;
+    }
+
+    private int minimax(Board board, int depth, int alpha, int beta, boolean maximizing) {
+        if (depth == 0 || isTimeExceeded(ABSOLUTE_LIMIT_MS)) {
+            return evaluatePosition(board);
         }
-      }
-    }
-    return true;
-  }
 
-  private void updateResourceProfile(long moveTime, int depth) {
-    // Update timing data for this depth
-    depthTimings[depth] = (depthTimings[depth] == 0) ?
-            (int)moveTime : (depthTimings[depth] + (int)moveTime) / 2;
+        int value = maximizing ? -INFINITY : INFINITY;
 
-    // Adjust depth based on performance
-    if (moveTime < TARGET_TIME_MS / 2 && currentMaxDepth < MAX_DEPTH) {
-      currentMaxDepth++;
-    } else if (moveTime > TARGET_TIME_MS * 0.9 && currentMaxDepth > MIN_DEPTH) {
-      currentMaxDepth--;
-    }
-  }
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            try {
+                Board newBoard = new Board(board, col,
+                        maximizing ? getCounter() : getCounter().getOther());
 
-  private int getOptimalSearchDepth() {
-    // Get current memory usage
-    long maxMemory = runtime.maxMemory();
-    long totalMemory = runtime.totalMemory();
-    long freeMemory = runtime.freeMemory();
-    double memoryUsageRatio = (double)(totalMemory - freeMemory) / maxMemory;
+                int eval = minimax(newBoard, depth - 1, alpha, beta, !maximizing);
 
-    // Start with current depth
-    int optimalDepth = currentMaxDepth;
+                if (maximizing) {
+                    value = Math.max(value, eval);
+                    alpha = Math.max(alpha, eval);
+                } else {
+                    value = Math.min(value, eval);
+                    beta = Math.min(beta, eval);
+                }
 
-    // Adjust based on memory usage
-    if (memoryUsageRatio > 0.8 && optimalDepth > MIN_DEPTH) {
-      optimalDepth--;
-    } else if (memoryUsageRatio < 0.5 && optimalDepth < MAX_DEPTH &&
-            (lastMoveTime == 0 || lastMoveTime < TARGET_TIME_MS * 0.8)) {
-      optimalDepth++;
+                if (beta <= alpha) break;
+                if (isTimeExceeded(ABSOLUTE_LIMIT_MS)) break;
+
+            } catch (Exception e) {
+                continue;
+            }
+        }
+
+        return value;
     }
 
-    // Check historical timing data
-    if (depthTimings[optimalDepth] > 0) {
-      while (depthTimings[optimalDepth] > TARGET_TIME_MS && optimalDepth > MIN_DEPTH) {
-        optimalDepth--;
-      }
+    private int evaluatePosition(Board board) {
+        int score = 0;
+        int center = board.getConfig().getWidth() / 2;
+
+        // Value center control
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            int distanceFromCenter = Math.abs(col - center);
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                Counter counter = board.getCounterAtPosition(new Position(col, row));
+                if (counter != null) {
+                    int value = counter == getCounter() ? 1 : -1;
+                    score += value * (5 - distanceFromCenter) * CENTER_WEIGHT;
+                }
+            }
+        }
+
+        return score;
     }
 
-    return optimalDepth;
-  }
-
-  private boolean isTimeUp() {
-    long elapsed = System.currentTimeMillis() - startTime;
-
-    // Primary time check
-    if (elapsed >= TARGET_TIME_MS) {
-      return true;
+    private boolean isTimeExceeded(long limit) {
+        return System.currentTimeMillis() - startTime > limit;
     }
 
-    // Predict if next iteration would exceed time limit
-    if (lastMoveTime > 0) {
-      long predictedNextMoveTime = lastMoveTime * 3;  // Conservative estimate
-      if (elapsed + predictedNextMoveTime > TARGET_TIME_MS) {
-        return true;
-      }
+    private boolean hasImmediateTacticalMove(Board board) {
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            try {
+                Board testBoard = new Board(board, col, getCounter());
+                if (isWinningMove(testBoard, col)) return true;
+                testBoard = new Board(board, col, getCounter().getOther());
+                if (isWinningMove(testBoard, col)) return true;
+            } catch (Exception e) {
+                continue;
+            }
+        }
+        return false;
     }
 
-    return false;
-  }
+    private boolean isWinningMove(Board board, int col) {
+        int row = findLastPieceRow(board, col);
+        if (row == -1) return false;
 
-  private boolean isWinningMove(Board board, int lastCol, int needToWin) {
-    // Find the row of the last placed piece
-    int row = 0;
-    for (int r = 0; r < board.getConfig().getHeight(); r++) {
-      if (board.getCounterAtPosition(new Position(lastCol, r)) != null) {
-        row = r;
-        break;
-      }
-    }
-
-    Counter counter = board.getCounterAtPosition(new Position(lastCol, row));
-    if (counter == null) return false;
-
-    // Check all directions for a win
-    for (int[] direction : DIRECTIONS) {
-      int count = 1;  // Start with 1 for the current piece
-      int dx = direction[0], dy = direction[1];
-
-      // Check positive direction
-      int x = lastCol + dx, y = row + dy;
-      while (isValidPosition(board, x, y) &&
-              board.getCounterAtPosition(new Position(x, y)) == counter) {
-        count++;
-        x += dx;
-        y += dy;
-      }
-
-      // Check negative direction
-      x = lastCol - dx;
-      y = row - dy;
-      while (isValidPosition(board, x, y) &&
-              board.getCounterAtPosition(new Position(x, y)) == counter) {
-        count++;
-        x -= dx;
-        y -= dy;
-      }
-
-      if (count >= needToWin) return true;
-    }
-    return false;
-  }
-
-  private int evaluatePosition(Board board) {
-    int score = 0;
-    int center = board.getConfig().getWidth() / 2;
-
-    // Evaluate center control and height advantage
-    for (int col = 0; col < board.getConfig().getWidth(); col++) {
-      int distanceFromCenter = Math.abs(col - center);
-      for (int row = 0; row < board.getConfig().getHeight(); row++) {
         Counter counter = board.getCounterAtPosition(new Position(col, row));
-        if (counter != null) {
-          int value = counter == getCounter() ? 1 : -1;
-          score += value * (5 - distanceFromCenter) * CENTER_WEIGHT;
-          score += value * (board.getConfig().getHeight() - row) * HEIGHT_WEIGHT;
+        if (counter == null) return false;
+
+        // Check all directions for a win
+        for (int[] dir : DIRECTIONS) {
+            if (countInDirection(board, col, row, dir[0], dir[1], counter) >=
+                    board.getConfig().getnInARowForWin()) {
+                return true;
+            }
         }
-      }
+        return false;
     }
 
-    return score;
-  }
-
-  private int[] getCenterBasedMoveOrder(int width) {
-    int[] moves = new int[width];
-    int center = width / 2;
-    int index = 0;
-
-    // Start with center column
-    moves[index++] = center;
-
-    // Add columns alternating outward
-    for (int offset = 1; offset <= center; offset++) {
-      if (center - offset >= 0) {
-        moves[index++] = center - offset;
-      }
-      if (center + offset < width) {
-        moves[index++] = center + offset;
-      }
+    private int findLastPieceRow(Board board, int col) {
+        for (int row = 0; row < board.getConfig().getHeight(); row++) {
+            if (board.getCounterAtPosition(new Position(col, row)) != null) {
+                return row;
+            }
+        }
+        return -1;
     }
 
-    return moves;
-  }
+    private int countInDirection(Board board, int startX, int startY,
+                                 int dx, int dy, Counter counter) {
+        int count = 1;
 
-  private boolean isValidPosition(Board board, int x, int y) {
-    return x >= 0 && x < board.getConfig().getWidth() &&
-            y >= 0 && y < board.getConfig().getHeight();
-  }
+        // Count in positive direction
+        int x = startX + dx, y = startY + dy;
+        while (isValidPosition(board, x, y) &&
+                board.getCounterAtPosition(new Position(x, y)) == counter) {
+            count++;
+            x += dx;
+            y += dy;
+        }
+
+        // Count in negative direction
+        x = startX - dx;
+        y = startY - dy;
+        while (isValidPosition(board, x, y) &&
+                board.getCounterAtPosition(new Position(x, y)) == counter) {
+            count++;
+            x -= dx;
+            y -= dy;
+        }
+
+        return count;
+    }
+
+    private boolean isValidPosition(Board board, int x, int y) {
+        return x >= 0 && x < board.getConfig().getWidth() &&
+                y >= 0 && y < board.getConfig().getHeight();
+    }
+
+    private boolean isEmptyBoard(Board board) {
+        for (int x = 0; x < board.getConfig().getWidth(); x++) {
+            if (board.getCounterAtPosition(new Position(x, 0)) != null) {
+                return false;
+            }
+        }
+        return true;
+    }
 }
