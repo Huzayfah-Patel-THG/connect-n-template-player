@@ -9,7 +9,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.thehutgroup.accelerator.connectn.player.*;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class StackOverFourTest {
@@ -28,6 +31,10 @@ public class StackOverFourTest {
         config = new GameConfig(10, 8, 4);
     }
 
+    /**
+     * Records and analyzes test execution time, providing detailed performance feedback
+     * and optimization suggestions when necessary.
+     */
     private void recordTestTime(String testName, long startTime) {
         long duration = System.currentTimeMillis() - startTime;
         testTimes.put(testName, duration);
@@ -35,7 +42,6 @@ public class StackOverFourTest {
         System.out.println("\n=== Performance Analysis for: " + testName + " ===");
         System.out.printf("Time taken: %d ms%n", duration);
 
-        // Provide detailed performance analysis based on duration
         if (duration > 5000) {
             System.out.println("⚠️  Performance Warning: Test exceeded 5 seconds");
             provideOptimizationSuggestions(testName, duration);
@@ -54,12 +60,16 @@ public class StackOverFourTest {
         System.out.println("=====================================");
     }
 
+    /**
+     * Provides context-specific optimization suggestions based on test type and performance.
+     */
     private void provideOptimizationSuggestions(String testName, long duration) {
         System.out.println("\nOptimization Suggestions:");
 
         if (testName.contains("Initial")) {
             System.out.println("💡 Consider caching opening moves");
             System.out.println("💡 Implement simple pattern matching for early game");
+            System.out.println("💡 Pre-calculate common opening sequences");
         }
         else if (testName.contains("Blocking")) {
             System.out.println("💡 Add threat detection patterns");
@@ -108,6 +118,7 @@ public class StackOverFourTest {
 
         Board board = new Board(config);
         try {
+            // Create a situation where opponent has three in a row
             board = new Board(board, 0, Counter.X);
             board = new Board(board, 1, Counter.X);
             board = new Board(board, 2, Counter.X);
@@ -128,6 +139,7 @@ public class StackOverFourTest {
 
         Board board = new Board(config);
         try {
+            // Create a situation where AI has three in a row
             board = new Board(board, 0, Counter.O);
             board = new Board(board, 1, Counter.O);
             board = new Board(board, 2, Counter.O);
@@ -142,12 +154,63 @@ public class StackOverFourTest {
     }
 
     @Test
-    @DisplayName("AI should respect time constraints")
-    void testPerformanceConstraints(TestInfo testInfo) {
+    @DisplayName("AI should calibrate performance based on system capabilities")
+    void testPerformanceCalibration(TestInfo testInfo) {
+        long startTime = System.currentTimeMillis();
+
+        // Create boards with increasing complexity
+        List<Board> testBoards = new ArrayList<>();
+        Board currentBoard = new Board(config);
+
+        try {
+            // Add boards with different complexity levels
+            testBoards.add(currentBoard);
+
+            for (int i = 0; i < 3; i++) {
+                for (int j = 0; j < 3; j++) {
+                    currentBoard = new Board(currentBoard, j,
+                            (i + j) % 2 == 0 ? Counter.O : Counter.X);
+                }
+                testBoards.add(currentBoard);
+            }
+
+            // Test each board and measure performance
+            List<Long> moveTimes = new ArrayList<>();
+            for (Board board : testBoards) {
+                long moveStart = System.currentTimeMillis();
+                player.makeMove(board);
+                moveTimes.add(System.currentTimeMillis() - moveStart);
+            }
+
+            // Verify that move times stay within limits even with increasing complexity
+            for (int i = 0; i < moveTimes.size(); i++) {
+                assertTrue(moveTimes.get(i) < 10000,
+                        String.format("Move %d took %d ms, exceeding limit", i, moveTimes.get(i)));
+            }
+
+            // Verify that later moves adapt based on earlier performance
+            if (moveTimes.size() > 1) {
+                long firstMove = moveTimes.get(0);
+                long lastMove = moveTimes.get(moveTimes.size() - 1);
+                assertTrue(Math.abs(lastMove - firstMove) < 5000,
+                        "Move times should stabilize after calibration");
+            }
+
+        } catch (Exception e) {
+            fail("Error during calibration test: " + e.getMessage());
+        }
+
+        recordTestTime(testInfo.getDisplayName(), startTime);
+    }
+
+    @Test
+    @DisplayName("AI should adapt to performance constraints")
+    void testPerformanceAdaptation(TestInfo testInfo) {
         long startTime = System.currentTimeMillis();
 
         Board board = new Board(config);
         try {
+            // Create a moderately complex board position
             for (int i = 0; i < 5; i++) {
                 for (int j = 0; j < 5; j++) {
                     board = new Board(board, j,
@@ -155,12 +218,32 @@ public class StackOverFourTest {
                 }
             }
 
-            long moveStart = System.currentTimeMillis();
-            player.makeMove(board);
-            long moveTime = System.currentTimeMillis() - moveStart;
+            // Test multiple moves to verify adaptation
+            List<Long> moveTimes = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                long moveStart = System.currentTimeMillis();
+                int move = player.makeMove(board);
+                long moveTime = System.currentTimeMillis() - moveStart;
+                moveTimes.add(moveTime);
 
-            assertTrue(moveTime < 10000,
-                    String.format("Move took %d ms, exceeding 10 second limit", moveTime));
+                assertTrue(moveTime < 10000,
+                        String.format("Move %d took %d ms, exceeding 10 second limit", i, moveTime));
+
+                // Make the move to advance the position
+                board = new Board(board, move, Counter.O);
+                if (i < 2) { // Make opponent move except after last iteration
+                    // Choose a valid column for opponent's move
+                    int opponentMove = (move + 1) % board.getConfig().getWidth();
+                    board = new Board(board, opponentMove, Counter.X);
+                }
+            }
+
+            // Verify that move times are adapting and stabilizing
+            if (moveTimes.size() > 1) {
+                long maxDifference = Collections.max(moveTimes) - Collections.min(moveTimes);
+                assertTrue(maxDifference < 5000,
+                        "Move times should stabilize with performance adaptation");
+            }
 
         } catch (Exception e) {
             fail("Error during performance test: " + e.getMessage());
@@ -176,6 +259,7 @@ public class StackOverFourTest {
 
         Board board = new Board(config);
         try {
+            // Fill first column completely
             for (int i = 0; i < config.getHeight(); i++) {
                 board = new Board(board, 0,
                         i % 2 == 0 ? Counter.O : Counter.X);
@@ -199,6 +283,7 @@ public class StackOverFourTest {
 
         Board board = new Board(config);
         try {
+            // Create a potential fork situation
             board = new Board(board, 1, Counter.X);
             board = new Board(board, 2, Counter.X);
             board = new Board(board, 4, Counter.X);
@@ -224,6 +309,7 @@ public class StackOverFourTest {
             System.gc();
             long beforeUsed = runtime.totalMemory() - runtime.freeMemory();
 
+            // Create a complex board position
             for (int i = 0; i < 5; i++) {
                 for (int j = 0; j < 5; j++) {
                     board = new Board(board, j,
@@ -231,7 +317,11 @@ public class StackOverFourTest {
                 }
             }
 
-            player.makeMove(board);
+            // Make multiple moves to stress memory usage
+            for (int i = 0; i < 3; i++) {
+                int move = player.makeMove(board);
+                board = new Board(board, move, Counter.O);
+            }
 
             System.gc();
             long afterUsed = runtime.totalMemory() - runtime.freeMemory();
@@ -286,3 +376,4 @@ public class StackOverFourTest {
                 });
     }
 }
+
