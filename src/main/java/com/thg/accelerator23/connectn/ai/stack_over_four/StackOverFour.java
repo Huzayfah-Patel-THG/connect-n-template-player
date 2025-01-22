@@ -8,7 +8,7 @@ import com.thehutgroup.accelerator.connectn.player.InvalidMoveException;
 
 public class StackOverFour extends Player {
 
-    private static final int MAX_DEPTH = 6;  // Depth for Minimax search
+    private static final int MAX_DEPTH = 6;  // Increased depth for deeper analysis
 
     public StackOverFour(Counter counter) {
         super(counter, StackOverFour.class.getName());
@@ -80,7 +80,7 @@ public class StackOverFour extends Player {
     private int evaluate(Board board, Counter aiCounter, Counter opponentCounter) {
         int score = 0;
 
-        // Evaluate the lines for AI and opponent
+        // Check for immediate wins or losses
         score += evaluateLines(board, aiCounter);
         score -= evaluateLines(board, opponentCounter);
 
@@ -144,18 +144,28 @@ public class StackOverFour extends Player {
             }
         }
 
+        // AI wins
         if (counterCount == 4) {
-            score += 1000;  // AI wins
-        } else if (opponentCount == 4) {
-            score -= 1000;  // Opponent wins
-        } else if (counterCount == 3 && emptyCount == 1) {
-            score += 100;  // AI can win soon
-        } else if (opponentCount == 3 && emptyCount == 1) {
-            score -= 100;  // Opponent can win soon
-        } else if (counterCount == 2 && emptyCount == 2) {
-            score += 10;  // AI has a two-in-a-row setup
-        } else if (opponentCount == 2 && emptyCount == 2) {
-            score -= 10;  // Opponent has a two-in-a-row setup
+            score += 1000;
+        }
+        // Opponent wins
+        else if (opponentCount == 4) {
+            score -= 1000;
+        }
+        // AI can win soon
+        else if (counterCount == 3 && emptyCount == 1) {
+            score += 100;
+        }
+        // Opponent can win soon
+        else if (opponentCount == 3 && emptyCount == 1) {
+            score -= 100;
+        }
+        // Two-in-a-row setups
+        else if (counterCount == 2 && emptyCount == 2) {
+            score += 10;
+        }
+        else if (opponentCount == 2 && emptyCount == 2) {
+            score -= 10;
         }
 
         return score;
@@ -168,7 +178,7 @@ public class StackOverFour extends Player {
         for (int row = 0; row < board.getConfig().getHeight(); row++) {
             Position position = new Position(centerColumn, row);
             if (board.getCounterAtPosition(position) == counter) {
-                score += 1;
+                score += 1;  // AI prefers to control the center
             }
         }
 
