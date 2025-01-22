@@ -112,6 +112,99 @@ public class StackOverFourTest {
     }
 
     @Test
+    @DisplayName("AI should understand double threats")
+    void testDoubleThreats(TestInfo testInfo) {
+        long startTime = System.currentTimeMillis();
+
+        Board board = new Board(config);
+        try {
+            // Create a double threat position:
+            // O O - -
+            // X X O -
+            // X O X O
+            board = new Board(board, 0, Counter.X);
+            board = new Board(board, 0, Counter.O);
+            board = new Board(board, 0, Counter.X);
+            board = new Board(board, 1, Counter.X);
+            board = new Board(board, 1, Counter.O);
+            board = new Board(board, 1, Counter.O);
+            board = new Board(board, 2, Counter.X);
+            board = new Board(board, 2, Counter.O);
+            board = new Board(board, 3, Counter.O);
+
+            int move = player.makeMove(board);
+
+            assertEquals(2, move, "AI should choose column 2 to create a double threat");
+
+        } catch (Exception e) {
+            fail("Error during double threat test: " + e.getMessage());
+        }
+
+        recordTestTime(testInfo.getDisplayName(), startTime);
+    }
+
+    @Test
+    @DisplayName("AI should understand strategic territory control")
+    void testStrategicTerritory(TestInfo testInfo) {
+        long startTime = System.currentTimeMillis();
+
+        Board board = new Board(config);
+        try {
+            // Create a position where territory control is crucial
+            // - - - -
+            // - O - -
+            // X O X -
+            board = new Board(board, 1, Counter.X);
+            board = new Board(board, 1, Counter.O);
+            board = new Board(board, 1, Counter.O);
+            board = new Board(board, 3, Counter.X);
+
+            int move = player.makeMove(board);
+
+            // Should play in column 2 to maintain central control
+            assertEquals(2, move,
+                    "AI should prioritize central territory control");
+
+        } catch (Exception e) {
+            fail("Error during strategic territory test: " + e.getMessage());
+        }
+
+        recordTestTime(testInfo.getDisplayName(), startTime);
+    }
+
+    @Test
+    @DisplayName("AI should recognize trapped positions")
+    void testTrappedPositions(TestInfo testInfo) {
+        long startTime = System.currentTimeMillis();
+
+        Board board = new Board(config);
+        try {
+            // Create a trapped position where opponent controls both sides
+            // - - - - -
+            // X - - - X
+            // X O O O X
+            for (int i = 1; i < 4; i++) {
+                board = new Board(board, i, Counter.O);
+            }
+            board = new Board(board, 0, Counter.X);
+            board = new Board(board, 0, Counter.X);
+            board = new Board(board, 4, Counter.X);
+            board = new Board(board, 4, Counter.X);
+
+            int move = player.makeMove(board);
+
+            // Should avoid trapped center columns
+            assertTrue(move < 1 || move > 3,
+                    "AI should avoid trapped central positions");
+
+        } catch (Exception e) {
+            fail("Error during trapped position test: " + e.getMessage());
+        }
+
+        recordTestTime(testInfo.getDisplayName(), startTime);
+    }
+
+    @Test
     @DisplayName("AI should block opponent's winning move")
     void testBlockingWin(TestInfo testInfo) {
         long startTime = System.currentTimeMillis();
