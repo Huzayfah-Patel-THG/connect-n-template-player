@@ -5,11 +5,13 @@ import com.thehutgroup.accelerator.connectn.player.Counter;
 import com.thehutgroup.accelerator.connectn.player.Player;
 import com.thehutgroup.accelerator.connectn.player.Position;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class StackOverFour extends Player {
-    private int beta = Integer.MAX_VALUE;
+    private static final int beta = Integer.MAX_VALUE;
     private static final int INITIAL_DEPTH = 4;
     private static int MAX_DEPTH = 12;
     private static long TIME_BUFFER_MS = 1000;
@@ -36,12 +38,14 @@ public class StackOverFour extends Player {
         final int score;
         final int alpha;
         final int beta;
+        final long timestamp;
 
         BoardState(int depth, int score, int alpha, int beta) {
             this.depth = depth;
             this.score = score;
             this.alpha = alpha;
             this.beta = beta;
+            this.timestamp = System.currentTimeMillis();
         }
     }
     private final Map<String, BoardState> transpositionTable = new HashMap<>(TRANSPOSITION_TABLE_SIZE);
@@ -69,6 +73,55 @@ public class StackOverFour extends Player {
 
     private static final int ENDGAME_PIECE_THRESHOLD = 52; // 80% of board filled
 
+    // After existing static fields
+    private static long firstMoveStartTime = -1;
+    private static int performanceCalibrationDepth = 6;
+    private static double avgNodesPerMs = 0;
+    private static final int MEMORY_THRESHOLD_MB = 1500;
+    private static final Runtime runtime = Runtime.getRuntime();
+
+    private static final class OpponentMove {
+        final int column;
+        final long timeSpent;
+        final boolean wasWinningMove;
+
+        OpponentMove(int column, long timeSpent, boolean wasWinningMove) {
+            this.column = column;
+            this.timeSpent = timeSpent;
+            this.wasWinningMove = wasWinningMove;
+        }
+    }
+
+    private static int currentMaxDepth = 8;
+    private static long timeBuffer = 1000;
+
+    private static final class DatabaseEntry {
+        final int bestMove;
+        final int score;
+        final int depth;
+        final long timestamp;
+
+        DatabaseEntry(int bestMove, int score, int depth) {
+            this.bestMove = bestMove;
+            this.score = score;
+            this.depth = depth;
+            this.timestamp = System.currentTimeMillis();
+        }
+    }
+
+    private static final Map<String, DatabaseEntry> positionDatabase = new HashMap<>();
+    private static final int CLEANUP_THRESHOLD = 450000;
+    private final List<OpponentMove> opponentMoves = new ArrayList<>();
+    private long lastOpponentMoveStart = 0;
+
+    private enum OpponentStyle {
+        AGGRESSIVE,
+        DEFENSIVE,
+        BALANCED,
+        UNKNOWN
+    }
+    private OpponentStyle opponentStyle = OpponentStyle.UNKNOWN;
+
     private boolean isEndgame(Board board) {
         int pieces = 0;
         for (int col = 0; col < board.getConfig().getWidth(); col++) {
@@ -87,18 +140,102 @@ public class StackOverFour extends Player {
 
     @Override
     public int makeMove(Board board) {
-        long startTime = System.currentTimeMillis();
-        int bestMove = findBestMove(board);
+        if (firstMoveStartTime == -1) {
+            firstMoveStartTime = System.currentTimeMillis();
+            int nodes = calibratePerformance(board);
+            avgNodesPerMs = nodes / (System.currentTimeMillis() - firstMoveStartTime);
+            adjustSearchParameters();
+        }
 
-        if (System.currentTimeMillis() - startTime >= 8000) {
-            for(int col = 0; col < board.getConfig().getWidth(); col++) {
-                if(isColumnNotFull(board, col)) {
-                    return col;
+        if (getUsedMemoryMB() > MEMORY_THRESHOLD_MB) {
+            cleanupMemory();
+        }
+
+        if (lastOpponentMoveStart > 0) {
+            updateOpponentModel(board);
+        }
+        lastOpponentMoveStart = System.currentTimeMillis();
+
+        String boardKey = getBoardKey(board);
+        DatabaseEntry dbEntry = positionDatabase.get(boardKey);
+        if (dbEntry != null && dbEntry.depth >= currentMaxDepth) {
+            return dbEntry.bestMove;
+        }
+
+        return findBestMove(board);
+    }
+
+    private int calibratePerformance(Board board) {
+        int nodes = 0;
+        for (int i = 1; i <= performanceCalibrationDepth; i++) {
+            nodes += countNodes(board, i);
+        }
+        return nodes;
+    }
+
+    private void adjustSearchParameters() {
+        long availableTime = 7000;
+        long expectedNodes = (long)(availableTime * avgNodesPerMs);
+        currentMaxDepth = estimateReachableDepth(expectedNodes);
+        timeBuffer = Math.max(500, 1000 - (currentMaxDepth * 50));
+    }
+
+    private int estimateReachableDepth(long nodes) {
+        int depth = 1;
+        long estimatedNodes = 1;
+        while (estimatedNodes * 7 < nodes && depth < 15) {
+            estimatedNodes *= 7;
+            depth++;
+        }
+        return Math.min(depth, 12);
+    }
+
+    private void cleanupMemory() {
+        long currentTime = System.currentTimeMillis();
+        transpositionTable.entrySet().removeIf(e ->
+                currentTime - e.getValue().timestamp > 10000 ||
+                        transpositionTable.size() > CLEANUP_THRESHOLD);
+        System.gc();
+    }
+
+    private int getUsedMemoryMB() {
+        return (int)((runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024));
+    }
+
+    private void updateOpponentModel(Board board) {
+        long moveTime = System.currentTimeMillis() - lastOpponentMoveStart;
+        boolean wasWinning = false;
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                Position pos = new Position(col, row);
+                if (board.getCounterAtPosition(pos) == getCounter().getOther()) {
+                    wasWinning = evaluatePosition(board) < -THREAT_SCORE;
+                    opponentMoves.add(new OpponentMove(col, moveTime, wasWinning));
+                    break;
                 }
             }
         }
 
-        return bestMove;
+        if (opponentMoves.size() >= 3) {
+            updateOpponentStyle();
+        }
+    }
+
+    private void updateOpponentStyle() {
+        int aggressiveCount = 0;
+        int defensiveCount = 0;
+
+        for (OpponentMove move : opponentMoves) {
+            if (move.wasWinningMove) aggressiveCount++;
+            if (move.timeSpent > 3000) defensiveCount++;
+        }
+
+        double aggressiveRatio = (double)aggressiveCount / opponentMoves.size();
+        double defensiveRatio = (double)defensiveCount / opponentMoves.size();
+
+        if (aggressiveRatio > 0.6) opponentStyle = OpponentStyle.AGGRESSIVE;
+        else if (defensiveRatio > 0.6) opponentStyle = OpponentStyle.DEFENSIVE;
+        else opponentStyle = OpponentStyle.BALANCED;
     }
 
     private int findBestMove(Board board) {
@@ -150,6 +287,21 @@ public class StackOverFour extends Player {
             killerMoves[depth] = move;
             historyTable[move][depth % board.getConfig().getHeight()] += depth * depth;
         }
+    }
+
+    private int countNodes(Board board, int depth) {
+        if (depth == 0) return 1;
+        int nodes = 1;
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            if (!isColumnNotFull(board, col)) continue;
+            try {
+                Board nextBoard = new Board(board, col, getCounter());
+                nodes += countNodes(nextBoard, depth - 1);
+            } catch (Exception e) {
+                continue;
+            }
+        }
+        return nodes;
     }
 
     private int minimax(Board board, int depth, int alpha, int beta, boolean maximizing) {
