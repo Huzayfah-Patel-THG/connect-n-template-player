@@ -4,11 +4,82 @@ import com.thehutgroup.accelerator.connectn.player.Board;
 import com.thehutgroup.accelerator.connectn.player.Counter;
 import com.thehutgroup.accelerator.connectn.player.Player;
 import com.thehutgroup.accelerator.connectn.player.Position;
-import com.thehutgroup.accelerator.connectn.player.InvalidMoveException;
+
+import java.util.HashMap;
+import java.util.Map;
 
 public class StackOverFour extends Player {
+    private int beta = Integer.MAX_VALUE;
+    private static final int INITIAL_DEPTH = 4;
+    private static int MAX_DEPTH = 12;
+    private static long TIME_BUFFER_MS = 1000;
+    private static final int THREAT_SCORE = 1000;
 
-    private static final int MAX_DEPTH = 6;  // Increased depth for deeper analysis
+    private static final int HISTORY_TABLE_SIZE = 1000;
+    private final int[][] historyTable = new int[10][8];  // width x height
+    private final int[] killerMoves = new int[MAX_DEPTH];
+
+    private static final int[][] POSITION_VALUES = {
+            {3, 4, 5, 7, 7, 7, 5, 4, 3, 3},  // Bottom row
+            {4, 6, 8, 10, 10, 10, 8, 6, 4, 4},
+            {5, 8, 11, 13, 13, 13, 11, 8, 5, 5},
+            {5, 8, 11, 13, 13, 13, 11, 8, 5, 5},
+            {4, 6, 8, 10, 10, 10, 8, 6, 4, 4},
+            {3, 4, 5, 7, 7, 7, 5, 4, 3, 3},
+            {2, 3, 4, 5, 5, 5, 4, 3, 2, 2},
+            {1, 2, 3, 4, 4, 4, 3, 2, 1, 1}   // Top row
+    };
+
+    private static final int TRANSPOSITION_TABLE_SIZE = 1_000_000;
+    private static final class BoardState {
+        final int depth;
+        final int score;
+        final int alpha;
+        final int beta;
+
+        BoardState(int depth, int score, int alpha, int beta) {
+            this.depth = depth;
+            this.score = score;
+            this.alpha = alpha;
+            this.beta = beta;
+        }
+    }
+    private final Map<String, BoardState> transpositionTable = new HashMap<>(TRANSPOSITION_TABLE_SIZE);
+
+    private static final class Pattern {
+        final Counter[] sequence;
+        final int score;
+
+        Pattern(Counter[] sequence, int score) {
+            this.sequence = sequence;
+            this.score = score;
+        }
+    }
+
+    private static final Pattern[] PATTERNS = {
+            new Pattern(new Counter[]{Counter.X, Counter.X, Counter.X, null}, 800),
+            new Pattern(new Counter[]{Counter.X, Counter.X, null, Counter.X}, 800),
+            new Pattern(new Counter[]{Counter.X, null, Counter.X, Counter.X}, 800),
+            new Pattern(new Counter[]{null, Counter.X, Counter.X, Counter.X}, 800),
+            new Pattern(new Counter[]{Counter.X, Counter.X, null, null}, 400),
+            new Pattern(new Counter[]{Counter.X, null, Counter.X, null}, 400),
+            new Pattern(new Counter[]{null, Counter.X, Counter.X, null}, 400),
+            new Pattern(new Counter[]{Counter.X, null, null, null}, 200)
+    };
+
+    private static final int ENDGAME_PIECE_THRESHOLD = 52; // 80% of board filled
+
+    private boolean isEndgame(Board board) {
+        int pieces = 0;
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                if (board.getCounterAtPosition(new Position(col, row)) != null) {
+                    pieces++;
+                }
+            }
+        }
+        return pieces >= ENDGAME_PIECE_THRESHOLD;
+    }
 
     public StackOverFour(Counter counter) {
         super(counter, StackOverFour.class.getName());
@@ -16,25 +87,13 @@ public class StackOverFour extends Player {
 
     @Override
     public int makeMove(Board board) {
-        int bestMove = -1;
-        int bestScore = Integer.MIN_VALUE;
+        long startTime = System.currentTimeMillis();
+        int bestMove = findBestMove(board);
 
-        // Loop through all columns and evaluate each move
-        for (int col = 0; col < board.getConfig().getWidth(); col++) {
-            if (!isColumnFull(board, col)) {
-                try {
-                    // Copy the board and simulate the move
-                    Board newBoard = new Board(board, col, this.getCounter());
-
-                    // Minimax evaluation (AI is maximizing, opponent is minimizing)
-                    int moveScore = minimax(newBoard, MAX_DEPTH, false, Integer.MIN_VALUE, Integer.MAX_VALUE);
-                    if (moveScore > bestScore) {
-                        bestScore = moveScore;
-                        bestMove = col;
-                    }
-                } catch (InvalidMoveException e) {
-                    // Skip invalid moves
-                    continue;
+        if (System.currentTimeMillis() - startTime >= 8000) {
+            for(int col = 0; col < board.getConfig().getWidth(); col++) {
+                if(isColumnNotFull(board, col)) {
+                    return col;
                 }
             }
         }
@@ -42,163 +101,337 @@ public class StackOverFour extends Player {
         return bestMove;
     }
 
-    private int minimax(Board board, int depth, boolean isMaximizingPlayer, int alpha, int beta) {
-        if (depth == 0 || isBoardFull(board)) {
-            // Evaluate the board from the perspective of the AI
-            return evaluate(board, this.getCounter(), getOpponentCounter());
+    private int findBestMove(Board board) {
+        long startTime = System.currentTimeMillis();
+        if (isEndgame(board)) {
+            MAX_DEPTH = 15; // Search deeper in endgame
+            TIME_BUFFER_MS = 500; // Reduce buffer for deeper search
+        }
+        int bestMove = board.getConfig().getWidth() / 2;
+
+        for (int depth = INITIAL_DEPTH; depth <= MAX_DEPTH; depth++) {
+            if (isTimeExceeded(startTime)) break;
+
+            int move = findMoveAtDepth(board, depth, startTime);
+            if (!isTimeExceeded(startTime)) {
+                bestMove = move;
+            }
         }
 
-        int bestScore = isMaximizingPlayer ? Integer.MIN_VALUE : Integer.MAX_VALUE;
-        for (int col = 0; col < board.getConfig().getWidth(); col++) {
-            if (!isColumnFull(board, col)) {
-                try {
-                    Board newBoard = new Board(board, col, isMaximizingPlayer ? this.getCounter() : getOpponentCounter());
-                    int score = minimax(newBoard, depth - 1, !isMaximizingPlayer, alpha, beta);
+        return bestMove;
+    }
 
-                    if (isMaximizingPlayer) {
-                        bestScore = Math.max(bestScore, score);
-                        alpha = Math.max(alpha, bestScore);
-                    } else {
-                        bestScore = Math.min(bestScore, score);
-                        beta = Math.min(beta, bestScore);
-                    }
+    private int findMoveAtDepth(Board board, int depth, long startTime) {
+        int bestScore = Integer.MIN_VALUE;
+        int bestMove = board.getConfig().getWidth() / 2;
 
-                    // Alpha-Beta pruning
-                    if (beta <= alpha) {
-                        break;
-                    }
-                } catch (InvalidMoveException e) {
-                    // Skip invalid moves
-                    continue;
+        int[] moveOrder = getOrderedMoves(board, depth);
+        for (int col : moveOrder) {
+            if (isTimeExceeded(startTime) || !isColumnNotFull(board, col)) continue;
+
+            try {
+                Board nextBoard = new Board(board, col, getCounter());
+                int score = minimax(nextBoard, depth, Integer.MIN_VALUE, Integer.MAX_VALUE, false);
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestMove = col;
                 }
+            } catch (Exception e) {
+                continue;
             }
+        }
+
+        return bestMove;
+    }
+
+    private void updateHistoryAndKillers(int depth, int move, int score, Board board) {
+        if (score >= beta) {
+            killerMoves[depth] = move;
+            historyTable[move][depth % board.getConfig().getHeight()] += depth * depth;
+        }
+    }
+
+    private int minimax(Board board, int depth, int alpha, int beta, boolean maximizing) {
+        String boardKey = getBoardKey(board);
+        BoardState cached = transpositionTable.get(boardKey);
+
+        if (cached != null && cached.depth >= depth) {
+            if (cached.alpha >= beta) return cached.alpha;
+            if (cached.beta <= alpha) return cached.beta;
+            alpha = Math.max(alpha, cached.alpha);
+            beta = Math.min(beta, cached.beta);
+        }
+
+        if (depth == 0 || isTerminal(board)) {
+            int score = evaluatePosition(board);
+            transpositionTable.put(boardKey, new BoardState(depth, score, score, score));
+            return score;
+        }
+
+        Counter currentPlayer = maximizing ? getCounter() : getCounter().getOther();
+        int originalAlpha = alpha;
+        int originalBeta = beta;
+        int bestScore = maximizing ? Integer.MIN_VALUE : Integer.MAX_VALUE;
+
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            if (!isColumnNotFull(board, col)) continue;
+
+            try {
+                Board nextBoard = new Board(board, col, currentPlayer);
+                int score = minimax(nextBoard, depth - 1, alpha, beta, !maximizing);
+
+                bestScore = maximizing ? Math.max(bestScore, score) : Math.min(bestScore, score);
+                if (maximizing) alpha = Math.max(alpha, score);
+                else beta = Math.min(beta, score);
+
+                if (beta <= alpha) {
+                    updateHistoryAndKillers(depth, col, bestScore, board);
+                    break;
+                }
+            } catch (Exception e) {
+                continue;
+            }
+        }
+
+        if (bestScore <= originalAlpha) {
+            transpositionTable.put(boardKey, new BoardState(depth, bestScore, Integer.MIN_VALUE, bestScore));
+        } else if (bestScore >= originalBeta) {
+            transpositionTable.put(boardKey, new BoardState(depth, bestScore, bestScore, Integer.MAX_VALUE));
+        } else {
+            transpositionTable.put(boardKey, new BoardState(depth, bestScore, bestScore, bestScore));
         }
 
         return bestScore;
     }
 
-    private int evaluate(Board board, Counter aiCounter, Counter opponentCounter) {
-        int score = 0;
-
-        // Check for immediate wins or losses
-        score += evaluateLines(board, aiCounter);
-        score -= evaluateLines(board, opponentCounter);
-
-        // Evaluate center control for AI
-        score += evaluateCenterControl(board, aiCounter);
-
-        return score;
+    private String getBoardKey(Board board) {
+        StringBuilder key = new StringBuilder();
+        for (int x = 0; x < board.getConfig().getWidth(); x++) {
+            for (int y = 0; y < board.getConfig().getHeight(); y++) {
+                Counter counter = board.getCounterAtPosition(new Position(x, y));
+                key.append(counter == null ? '-' : counter.getStringRepresentation());
+            }
+        }
+        return key.toString();
     }
 
-    private int evaluateLines(Board board, Counter counter) {
+    private int evaluatePosition(Board board) {
         int score = 0;
 
-        // Horizontal, Vertical, and Diagonal evaluations
+        // Pattern evaluation
         for (int row = 0; row < board.getConfig().getHeight(); row++) {
-            for (int col = 0; col < board.getConfig().getWidth() - 3; col++) {
-                score += evaluateLine(board, row, col, 0, 1, counter);  // Horizontal line
+            for (int col = 0; col < board.getConfig().getWidth(); col++) {
+                score += evaluatePattern(board, col, row, 1, 0);
+                score += evaluatePattern(board, col, row, 0, 1);
+                score += evaluatePattern(board, col, row, 1, 1);
+                score += evaluatePattern(board, col, row, 1, -1);
             }
         }
 
-        for (int col = 0; col < board.getConfig().getWidth(); col++) {
-            for (int row = 0; row < board.getConfig().getHeight() - 3; row++) {
-                score += evaluateLine(board, row, col, 1, 0, counter);  // Vertical line
-            }
-        }
+        // Threat detection
+        if (detectThreat(board, getCounter())) score += THREAT_SCORE;
+        if (detectThreat(board, getCounter().getOther())) score -= THREAT_SCORE;
 
-        for (int row = 0; row < board.getConfig().getHeight() - 3; row++) {
-            for (int col = 0; col < board.getConfig().getWidth() - 3; col++) {
-                score += evaluateLine(board, row, col, 1, 1, counter);  // Diagonal down-right
-            }
-        }
-
-        for (int row = 0; row < board.getConfig().getHeight() - 3; row++) {
-            for (int col = 3; col < board.getConfig().getWidth(); col++) {
-                score += evaluateLine(board, row, col, 1, -1, counter);  // Diagonal down-left
-            }
-        }
-
-        return score;
-    }
-
-    private int evaluateLine(Board board, int startRow, int startCol, int rowIncrement, int colIncrement, Counter counter) {
-        int score = 0;
-        int counterCount = 0;
-        int emptyCount = 0;
-        int opponentCount = 0;
-
-        for (int i = 0; i < 4; i++) {
-            int row = startRow + i * rowIncrement;
-            int col = startCol + i * colIncrement;
-            Position position = new Position(col, row);
-
-            if (board.isWithinBoard(position)) {
-                Counter current = board.getCounterAtPosition(position);
-                if (current == counter) {
-                    counterCount++;
-                } else if (current != null) {
-                    opponentCount++;
-                } else {
-                    emptyCount++;
+        // Add position-based evaluation
+        for (int row = 0; row < board.getConfig().getHeight(); row++) {
+            for (int col = 0; col < board.getConfig().getWidth(); col++) {
+                Counter counter = board.getCounterAtPosition(new Position(col, row));
+                if (counter == getCounter()) {
+                    score += POSITION_VALUES[row][col];
+                } else if (counter == getCounter().getOther()) {
+                    score -= POSITION_VALUES[row][col];
                 }
             }
         }
 
-        // AI wins
-        if (counterCount == 4) {
-            score += 1000;
-        }
-        // Opponent wins
-        else if (opponentCount == 4) {
-            score -= 1000;
-        }
-        // AI can win soon
-        else if (counterCount == 3 && emptyCount == 1) {
-            score += 100;
-        }
-        // Opponent can win soon
-        else if (opponentCount == 3 && emptyCount == 1) {
-            score -= 100;
-        }
-        // Two-in-a-row setups
-        else if (counterCount == 2 && emptyCount == 2) {
-            score += 10;
-        }
-        else if (opponentCount == 2 && emptyCount == 2) {
-            score -= 10;
+        if (isEndgame(board)) {
+            score *= 2; // Weight endgame positions more heavily
         }
 
         return score;
     }
 
-    private int evaluateCenterControl(Board board, Counter counter) {
-        int score = 0;
-        int centerColumn = board.getConfig().getWidth() / 2;
+    private int evaluatePattern(Board board, int startX, int startY, int dx, int dy) {
+        Counter[] line = new Counter[4];
+        for (int i = 0; i < 4; i++) {
+            int x = startX + (i * dx);
+            int y = startY + (i * dy);
+            line[i] = isValidPosition(board, x, y) ? board.getCounterAtPosition(new Position(x, y)) : null;
+        }
 
+        int score = 0;
+        for (Pattern pattern : PATTERNS) {
+            if (matchesPattern(line, pattern.sequence, getCounter())) {
+                score += pattern.score;
+            }
+            if (matchesPattern(line, pattern.sequence, getCounter().getOther())) {
+                score -= pattern.score;
+            }
+        }
+        return score;
+    }
+
+    private boolean matchesPattern(Counter[] line, Counter[] pattern, Counter player) {
+        for (int i = 0; i < 4; i++) {
+            if (pattern[i] != null && line[i] != player) return false;
+            if (pattern[i] == null && line[i] != null) return false;
+        }
+        return true;
+    }
+
+    private boolean detectThreat(Board board, Counter player) {
         for (int row = 0; row < board.getConfig().getHeight(); row++) {
-            Position position = new Position(centerColumn, row);
-            if (board.getCounterAtPosition(position) == counter) {
-                score += 1;  // AI prefers to control the center
+            for (int col = 0; col <= board.getConfig().getWidth() - 4; col++) {
+                if (isThreatenedLine(board, col, row, 1, 0, player)) return true;
             }
         }
 
-        return score;
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            for (int row = 0; row <= board.getConfig().getHeight() - 4; row++) {
+                if (isThreatenedLine(board, col, row, 0, 1, player)) return true;
+            }
+        }
+
+        for (int row = 0; row <= board.getConfig().getHeight() - 4; row++) {
+            for (int col = 0; col <= board.getConfig().getWidth() - 4; col++) {
+                if (isThreatenedLine(board, col, row, 1, 1, player)) return true;
+                if (isThreatenedLine(board, col, row + 3, 1, -1, player)) return true;
+            }
+        }
+
+        return false;
     }
 
-    private Counter getOpponentCounter() {
-        return this.getCounter() == Counter.X ? Counter.O : Counter.X;
+    private boolean isThreatenedLine(Board board, int startX, int startY, int dx, int dy, Counter player) {
+        int pieces = 0;
+        int emptySpaces = 0;
+        Position emptyPos = null;
+
+        for (int i = 0; i < 4; i++) {
+            int x = startX + (i * dx);
+            int y = startY + (i * dy);
+            Position pos = new Position(x, y);
+
+            Counter counter = board.getCounterAtPosition(pos);
+            if (counter == player) {
+                pieces++;
+            } else if (counter == null) {
+                emptySpaces++;
+                emptyPos = pos;
+            }
+        }
+
+        return pieces == 3 && emptySpaces == 1 && canPlacePiece(board, emptyPos);
     }
 
-    private boolean isColumnFull(Board board, int col) {
-        return board.hasCounterAtPosition(new Position(col, board.getConfig().getHeight() - 1));
+    private boolean canPlacePiece(Board board, Position pos) {
+        return pos.getY() == 0 || board.hasCounterAtPosition(new Position(pos.getX(), pos.getY() - 1));
+    }
+
+    private int[] getOrderedMoves(Board board, int depth) {
+        int width = board.getConfig().getWidth();
+        int[] moves = new int[width];
+        int[] scores = new int[width];
+
+        // Score moves
+        for (int col = 0; col < width; col++) {
+            if (!isColumnNotFull(board, col)) {
+                scores[col] = Integer.MIN_VALUE;
+                continue;
+            }
+
+            scores[col] = 0;
+            // Killer move bonus
+            if (col == killerMoves[depth]) {
+                scores[col] += 10000;
+            }
+            // History table score
+            scores[col] += historyTable[col][depth % board.getConfig().getHeight()];
+
+            // Center preference
+            scores[col] -= Math.abs(col - width/2) * 100;
+        }
+
+        // Sort moves by score
+        for (int i = 0; i < width; i++) {
+            moves[i] = i;
+        }
+        for (int i = 0; i < width-1; i++) {
+            for (int j = i+1; j < width; j++) {
+                if (scores[moves[j]] > scores[moves[i]]) {
+                    int temp = moves[i];
+                    moves[i] = moves[j];
+                    moves[j] = temp;
+                }
+            }
+        }
+
+        return moves;
+    }
+
+    private boolean isTimeExceeded(long startTime) {
+        return System.currentTimeMillis() - startTime > (8000 - TIME_BUFFER_MS);
+    }
+
+    private boolean isTerminal(Board board) {
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                if (isWinningPosition(board, col, row)) return true;
+            }
+        }
+        return isBoardFull(board);
+    }
+
+    private boolean isWinningPosition(Board board, int startX, int startY) {
+        if (checkDirection(board, startX, startY, 1, 0)) return true;
+        if (checkDirection(board, startX, startY, 0, 1)) return true;
+        if (checkDirection(board, startX, startY, 1, 1)) return true;
+        if (checkDirection(board, startX, startY, 1, -1)) return true;
+
+        return false;
+    }
+
+    private boolean checkDirection(Board board, int startX, int startY, int dx, int dy) {
+        Counter startCounter = board.getCounterAtPosition(new Position(startX, startY));
+        if (startCounter == null) return false;
+
+        int count = 1;
+
+        for (int i = 1; i < 4; i++) {
+            int x = startX + (i * dx);
+            int y = startY + (i * dy);
+
+            if (!isValidPosition(board, x, y)) break;
+            if (board.getCounterAtPosition(new Position(x, y)) != startCounter) break;
+            count++;
+        }
+
+        for (int i = 1; i < 4; i++) {
+            int x = startX - (i * dx);
+            int y = startY - (i * dy);
+
+            if (!isValidPosition(board, x, y)) break;
+            if (board.getCounterAtPosition(new Position(x, y)) != startCounter) break;
+            count++;
+        }
+
+        return count >= board.getConfig().getnInARowForWin();
+    }
+
+    private boolean isValidPosition(Board board, int x, int y) {
+        return x >= 0 && x < board.getConfig().getWidth() &&
+                y >= 0 && y < board.getConfig().getHeight();
     }
 
     private boolean isBoardFull(Board board) {
         for (int col = 0; col < board.getConfig().getWidth(); col++) {
-            if (!isColumnFull(board, col)) {
-                return false;
-            }
+            if (isColumnNotFull(board, col)) return false;
         }
         return true;
+    }
+
+    private boolean isColumnNotFull(Board board, int col) {
+        return !board.hasCounterAtPosition(new Position(col, board.getConfig().getHeight() - 1));
     }
 }
