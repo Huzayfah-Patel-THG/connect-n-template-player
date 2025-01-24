@@ -7,6 +7,7 @@ import java.util.*;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.util.concurrent.atomic.AtomicLong;
+
 public class StackOverFour extends Player {
     // Constants
     private static final int MAX_DEPTH = 12;
@@ -14,12 +15,18 @@ public class StackOverFour extends Player {
     private static final long SAFETY_BUFFER_MS = 1500;
     private static final int THREAT_SCORE = 10000;
     private static final int WINNING_SCORE = Integer.MAX_VALUE - 1;
-    private static final int POSITION_VALUE_SCALE = 10;
+    private static final int[] COLUMN_WEIGHTS = {1, 2, 4, 8, 16, 16, 8, 4, 2, 1};
+    private static final int[] ROW_WEIGHTS = {1, 2, 3, 4, 4, 3, 2, 1};
+    private static final int CENTER_BONUS = 2000;
+    private static final int POSITION_VALUE_SCALE = 100;
+
     // Pattern recognition scores
     private static final int FOUR_IN_A_ROW = 100000;
     private static final int THREE_IN_A_ROW_OPEN = 5000;
     private static final int THREE_IN_A_ROW_BLOCKED = 100;
     private static final int TWO_IN_A_ROW_OPEN = 50;
+    private static final int UNBLOCKED_THREE = 5000;
+    private static final int BLOCKED_THREE = 100;
 
     private static final Runtime runtime = Runtime.getRuntime();
 
@@ -51,7 +58,7 @@ public class StackOverFour extends Player {
         final int score;
         final int bestMove;
         final long timestamp;
-        final byte flag; // 0: exact, 1: lower bound, 2: upper bound
+        final byte flag;
 
         TranspositionEntry(int depth, int score, int bestMove, byte flag) {
             this.depth = depth;
@@ -78,6 +85,11 @@ public class StackOverFour extends Player {
             cleanupMemory();
         }
 
+        // First move preference for center
+        if (isEmptyBoard(board)) {
+            return board.getConfig().getWidth() / 2;
+        }
+
         // Check for immediate winning move
         int winningMove = findWinningMove(board, getCounter());
         if (winningMove != -1) return winningMove;
@@ -97,6 +109,17 @@ public class StackOverFour extends Player {
 
         nodeCount.set(0);
         return iterativeDeepeningSearch(board, startTime);
+    }
+
+    private boolean isEmptyBoard(Board board) {
+        for (int col = 0; col < board.getConfig().getWidth(); col++) {
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                if (board.getCounterAtPosition(new Position(col, row)) != null) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private int findWinningMove(Board board, Counter player) {
@@ -188,6 +211,57 @@ public class StackOverFour extends Player {
         }
 
         return bestMove;
+    }
+
+    private int[] getMoveOrder(Board board) {
+        int width = board.getConfig().getWidth();
+        int[] moves = new int[width];
+        int[] scores = new int[width];
+
+        for (int col = 0; col < width; col++) {
+            moves[col] = col;
+            if (!isValidMove(board, col)) {
+                scores[col] = Integer.MIN_VALUE;
+                continue;
+            }
+
+            scores[col] = 0;
+            // Strong center preference
+            scores[col] += COLUMN_WEIGHTS[col] * CENTER_BONUS;
+
+            try {
+                Board nextBoard = new Board(board, col, getCounter());
+                if (isWinningPosition(nextBoard, col, getCounter())) {
+                    scores[col] += 100000;
+                }
+
+                nextBoard = new Board(board, col, getCounter().getOther());
+                if (isWinningPosition(nextBoard, col, getCounter().getOther())) {
+                    scores[col] += 90000;
+                }
+
+                scores[col] += historyTable[col][board.getConfig().getHeight() % 8];
+            } catch (Exception e) {
+                continue;
+            }
+        }
+
+        // Sort by scores
+        for (int i = 0; i < width - 1; i++) {
+            for (int j = 0; j < width - i - 1; j++) {
+                if (scores[j] < scores[j + 1]) {
+                    int tempMove = moves[j];
+                    moves[j] = moves[j + 1];
+                    moves[j + 1] = tempMove;
+
+                    int tempScore = scores[j];
+                    scores[j] = scores[j + 1];
+                    scores[j + 1] = tempScore;
+                }
+            }
+        }
+
+        return moves;
     }
 
     private int negamax(Board board, int depth, int alpha, int beta, Counter player, long startTime) {
@@ -303,35 +377,32 @@ public class StackOverFour extends Player {
     }
 
     private boolean matchesPattern(Board board, int col, int row, int[] pattern, Counter player) {
-        // Check horizontal
-        if (checkPatternDirection(board, col, row, 1, 0, pattern, player)) return true;
-        // Check vertical
-        if (checkPatternDirection(board, col, row, 0, 1, pattern, player)) return true;
-        // Check diagonals
-        if (checkPatternDirection(board, col, row, 1, 1, pattern, player)) return true;
-        if (checkPatternDirection(board, col, row, 1, -1, pattern, player)) return true;
-        return false;
+        // Horizontal, vertical and diagonal checks
+        return checkPatternDirection(board, col, row, 1, 0, pattern, player) ||  // horizontal
+                checkPatternDirection(board, col, row, 0, 1, pattern, player) ||  // vertical
+                checkPatternDirection(board, col, row, 1, 1, pattern, player) ||  // diagonal /
+                checkPatternDirection(board, col, row, 1, -1, pattern, player);   // diagonal \
     }
 
     private boolean checkPatternDirection(Board board, int col, int row, int dx, int dy,
                                           int[] pattern, Counter player) {
-        for (int i = -3; i <= 0; i++) {
+        for (int offset = -3; offset <= 0; offset++) {
             boolean matches = true;
-            for (int j = 0; j < 4; j++) {
-                int x = col + (i + j) * dx;
-                int y = row + (i + j) * dy;
+            for (int i = 0; i < 4; i++) {
+                int x = col + (offset + i) * dx;
+                int y = row + (offset + i) * dy;
 
                 if (!isValidPosition(board, x, y)) {
                     matches = false;
                     break;
                 }
 
-                Counter counter = board.getCounterAtPosition(new Position(x, y));
-                if (pattern[j] == 1 && counter != player) {
+                Counter current = board.getCounterAtPosition(new Position(x, y));
+                if (pattern[i] == 1 && current != player) {
                     matches = false;
                     break;
                 }
-                if (pattern[j] == 0 && counter != null) {
+                if (pattern[i] == 0 && current != null) {
                     matches = false;
                     break;
                 }
@@ -341,84 +412,146 @@ public class StackOverFour extends Player {
         return false;
     }
 
-    private int evaluatePosition(Board board, Counter player) {
-        return evaluateConnections(board, player) +
-                evaluateCenter(board, player) * 5 + // Increased weight for center
-                evaluateMobility(board, player);
-    }
-
-    private int evaluateConnections(Board board, Counter player) {
-        int score = 0;
-        Counter opponent = player.getOther();
-
-        // Evaluate all possible lines
-        for (int row = 0; row < board.getConfig().getHeight(); row++) {
-            for (int col = 0; col < board.getConfig().getWidth(); col++) {
-                score += evaluateDirection(board, col, row, 1, 0, player, opponent);
-                score += evaluateDirection(board, col, row, 0, 1, player, opponent);
-                score += evaluateDirection(board, col, row, 1, 1, player, opponent);
-                score += evaluateDirection(board, col, row, 1, -1, player, opponent);
+    private boolean isWinningPosition(Board board, int lastCol, Counter player) {
+        if (lastCol == -1) {
+            // Full board scan for wins
+            for (int x = 0; x < board.getConfig().getWidth(); x++) {
+                for (int y = 0; y < board.getConfig().getHeight(); y++) {
+                    if (checkWinFromPosition(board, x, y, player)) {
+                        return true;
+                    }
+                }
             }
+            return false;
         }
 
-        return score;
+        int row = findLastRow(board, lastCol);
+        return checkWinFromPosition(board, lastCol, row, player);
     }
 
-    private int evaluateDirection(Board board, int startX, int startY, int dx, int dy,
-                                  Counter player, Counter opponent) {
-        int score = 0;
-        int count = 0;
-        int spaces = 0;
+    private boolean checkWinFromPosition(Board board, int col, int row, Counter player) {
+        // Check horizontal
+        for (int startCol = Math.max(0, col - 3); startCol <= Math.min(col, board.getConfig().getWidth() - 4); startCol++) {
+            if (checkLine(board, startCol, row, 1, 0, player)) return true;
+        }
 
+        // Check vertical
+        if (row >= 3 && checkLine(board, col, row - 3, 0, 1, player)) return true;
+
+        // Check diagonals
+        for (int i = -3; i <= 0; i++) {
+            // Rising diagonal /
+            if (checkLine(board, col + i, row + i, 1, 1, player)) return true;
+            // Falling diagonal \
+            if (checkLine(board, col + i, row - i, 1, -1, player)) return true;
+        }
+
+        return false;
+    }
+
+    private boolean checkLine(Board board, int startX, int startY, int dx, int dy, Counter player) {
+        // Bounds check
+        if (!isValidPosition(board, startX, startY)) return false;
+
+        int count = 0;
         for (int i = 0; i < 4; i++) {
             int x = startX + i * dx;
             int y = startY + i * dy;
 
-            if (!isValidPosition(board, x, y)) return 0;
+            if (!isValidPosition(board, x, y)) return false;
 
-            Counter counter = board.getCounterAtPosition(new Position(x, y));
-            if (counter == player) count++;
-            else if (counter == null) spaces++;
-            else return 0;
+            Counter pos = board.getCounterAtPosition(new Position(x, y));
+            if (pos == player) {
+                count++;
+                if (count == 4) return true;
+            } else {
+                count = 0;
+            }
         }
-
-        if (count == 3 && spaces == 1) score += THREE_IN_A_ROW_OPEN;
-        else if (count == 2 && spaces == 2) score += TWO_IN_A_ROW_OPEN;
-
-        return score;
+        return count == 4;
     }
 
-    private int evaluateCenter(Board board, Counter player) {
-        int[] columnValues = {1, 2, 4, 8, 16, 16, 8, 4, 2, 1}; // Exponential center preference
+    private int evaluatePosition(Board board, Counter player) {
         int score = 0;
+        Counter opponent = player.getOther();
 
+        // Center control evaluation
         for (int col = 0; col < board.getConfig().getWidth(); col++) {
             for (int row = 0; row < board.getConfig().getHeight(); row++) {
                 Counter counter = board.getCounterAtPosition(new Position(col, row));
                 if (counter == player) {
-                    score += columnValues[col] * 100;
+                    score += COLUMN_WEIGHTS[col] * ROW_WEIGHTS[row] * POSITION_VALUE_SCALE;
+                } else if (counter == opponent) {
+                    score -= COLUMN_WEIGHTS[col] * ROW_WEIGHTS[row] * POSITION_VALUE_SCALE;
                 }
             }
         }
+
+        // Threat evaluation
+        score += evaluateThreats(board, player) - evaluateThreats(board, opponent);
+
         return score;
     }
 
-    private int evaluateMobility(Board board, Counter player) {
-        int mobility = 0;
+    private int evaluateThreats(Board board, Counter player) {
+        int threatScore = 0;
+
+        // Check for connected pieces and potential threats
         for (int col = 0; col < board.getConfig().getWidth(); col++) {
-            if (isValidMove(board, col)) {
-                mobility++;
-                try {
-                    Board nextBoard = new Board(board, col, player);
-                    if (canCreateThreats(nextBoard, col, player)) {
-                        mobility += 2;
-                    }
-                } catch (Exception e) {
-                    continue;
+            for (int row = 0; row < board.getConfig().getHeight(); row++) {
+                if (board.getCounterAtPosition(new Position(col, row)) == player) {
+                    // Horizontal threats
+                    threatScore += evaluateDirectionalThreat(board, col, row, 1, 0, player);
+                    // Vertical threats
+                    threatScore += evaluateDirectionalThreat(board, col, row, 0, 1, player);
+                    // Diagonal threats
+                    threatScore += evaluateDirectionalThreat(board, col, row, 1, 1, player);
+                    threatScore += evaluateDirectionalThreat(board, col, row, 1, -1, player);
                 }
             }
         }
-        return mobility * 50;
+
+        return threatScore;
+    }
+
+    private int evaluateDirectionalThreat(Board board, int startX, int startY, int dx, int dy, Counter player) {
+        int consecutive = 0;
+        int openEnds = 0;
+
+        // Check backward for open end
+        if (isValidPosition(board, startX - dx, startY - dy) &&
+                board.getCounterAtPosition(new Position(startX - dx, startY - dy)) == null) {
+            openEnds++;
+        }
+
+        // Count consecutive pieces
+        for (int i = 0; i < 4; i++) {
+            int x = startX + (i * dx);
+            int y = startY + (i * dy);
+
+            if (!isValidPosition(board, x, y)) break;
+
+            Counter pos = board.getCounterAtPosition(new Position(x, y));
+            if (pos == player) {
+                consecutive++;
+            } else if (pos == null) {
+                // Check if this empty space is playable
+                if (y == 0 || board.hasCounterAtPosition(new Position(x, y - 1))) {
+                    openEnds++;
+                }
+                break;
+            } else {
+                break;
+            }
+        }
+
+        if (consecutive == 3) {
+            return openEnds > 0 ? UNBLOCKED_THREE : BLOCKED_THREE;
+        } else if (consecutive == 2) {
+            return openEnds == 2 ? TWO_IN_A_ROW_OPEN : 0;
+        }
+
+        return 0;
     }
 
     private List<Integer> generateMoves(Board board) {
@@ -430,119 +563,6 @@ public class StackOverFour extends Player {
                 moves.add(col);
             }
         }
-        return moves;
-    }
-
-
-    private boolean checkDirectWin(Board board, int col, int row, Counter player) {
-        // Check all 4 directions from the last move
-        return checkLine(board, col - 3, row, 1, 0, player) || // Horizontal
-                checkLine(board, col, row - 3, 0, 1, player) || // Vertical
-                checkLine(board, col - 3, row - 3, 1, 1, player) || // Diagonal rising
-                checkLine(board, col - 3, row + 3, 1, -1, player); // Diagonal falling
-    }
-
-    private boolean isWinningPosition(Board board, int lastCol, Counter player) {
-        if (lastCol != -1) {
-            int row = findLastRow(board, lastCol);
-            // Check all directions from last move
-            for (int col = Math.max(0, lastCol - 3); col <= Math.min(board.getConfig().getWidth() - 4, lastCol); col++) {
-                if (checkLine(board, col, row, 1, 0, player)) return true; // Horizontal
-            }
-            for (int r = Math.max(0, row - 3); r <= row; r++) {
-                if (checkLine(board, lastCol, r, 0, 1, player)) return true; // Vertical
-                // Diagonals
-                if (lastCol >= 3) {
-                    if (checkLine(board, lastCol - 3, r, 1, 1, player)) return true;
-                    if (checkLine(board, lastCol - 3, r + 3, 1, -1, player)) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean checkLine(Board board, int startX, int startY, int dx, int dy, Counter player) {
-        // Check bounds first
-        if (!isValidPosition(board, startX, startY)) {
-            startX = Math.max(0, Math.min(startX, board.getConfig().getWidth() - 1));
-            startY = Math.max(0, Math.min(startY, board.getConfig().getHeight() - 1));
-        }
-
-        int count = 0;
-        for (int i = 0; i < 4; i++) {
-            int x = startX + (i * dx);
-            int y = startY + (i * dy);
-            if (!isValidPosition(board, x, y)) return false;
-
-            Counter pos = board.getCounterAtPosition(new Position(x, y));
-            if (pos == player) {
-                count++;
-            } else if (pos != null) {
-                return false;
-            }
-        }
-        return count == 4;
-    }
-
-    private int findLastRow(Board board, int col) {
-        for (int row = 0; row < board.getConfig().getHeight(); row++) {
-            if (board.getCounterAtPosition(new Position(col, row)) == null) {
-                return row > 0 ? row - 1 : 0;
-            }
-        }
-        return board.getConfig().getHeight() - 1;
-    }
-
-    private int[] getMoveOrder(Board board) {
-        int width = board.getConfig().getWidth();
-        int[] moves = new int[width];
-        int[] scores = new int[width];
-
-        for (int col = 0; col < width; col++) {
-            moves[col] = col;
-            if (!isValidMove(board, col)) {
-                scores[col] = Integer.MIN_VALUE;
-                continue;
-            }
-
-            scores[col] = 0;
-            scores[col] += POSITION_VALUE_SCALE * (4 - Math.abs(col - width/2));
-
-            try {
-                Board nextBoard = new Board(board, col, getCounter());
-                if (isWinningPosition(nextBoard, col, getCounter())) {
-                    scores[col] += 10000;
-                }
-
-                nextBoard = new Board(board, col, getCounter().getOther());
-                if (isWinningPosition(nextBoard, col, getCounter().getOther())) {
-                    scores[col] += 9000;
-                }
-
-                scores[col] += historyTable[col][board.getConfig().getHeight() % 8];
-
-                if (col == killerMoves[currentMaxDepth % MAX_DEPTH]) {
-                    scores[col] += 5000;
-                }
-            } catch (Exception e) {
-                continue;
-            }
-        }
-
-        for (int i = 0; i < width - 1; i++) {
-            for (int j = 0; j < width - i - 1; j++) {
-                if (scores[j] < scores[j + 1]) {
-                    int tempMove = moves[j];
-                    moves[j] = moves[j + 1];
-                    moves[j + 1] = tempMove;
-
-                    int tempScore = scores[j];
-                    scores[j] = scores[j + 1];
-                    scores[j + 1] = tempScore;
-                }
-            }
-        }
-
         return moves;
     }
 
@@ -588,6 +608,15 @@ public class StackOverFour extends Player {
                 y >= 0 && y < board.getConfig().getHeight();
     }
 
+    private int findLastRow(Board board, int col) {
+        for (int row = 0; row < board.getConfig().getHeight(); row++) {
+            if (board.getCounterAtPosition(new Position(col, row)) == null) {
+                return row > 0 ? row - 1 : 0;
+            }
+        }
+        return board.getConfig().getHeight() - 1;
+    }
+
     private int findFastMove(Board board) {
         int centerCol = board.getConfig().getWidth() / 2;
 
@@ -605,4 +634,4 @@ public class StackOverFour extends Player {
         return centerCol;
     }
 
-    }
+}
