@@ -20,7 +20,7 @@ public class StackOverFour extends Player {
     private static final int THREE_IN_A_ROW_OPEN = 5000;
     private static final int THREE_IN_A_ROW_BLOCKED = 100;
     private static final int TWO_IN_A_ROW_OPEN = 50;
-    private static final int FORK_THREAT = 8000;
+
     private static final Runtime runtime = Runtime.getRuntime();
 
     // Memory management
